@@ -414,8 +414,183 @@ function showHistoryGraph(idx) {
   });
 }
 
-// --- その他 履歴/合体/sidepanel部分はあなたの現状コードそのまま動きます ---
+// --- drawGraphで履歴保存＆QID単位で複数可 ---
+function drawGraph(){
+  let legendHtml = '<div id="legend">'
+    + '<span style="font-weight:bold;">関係性カラー：</span><br>';
+  relationProps.forEach(r=>{
+    legendHtml += `<span style="display:inline-block; margin:3px 13px 3px 0;">
+      <svg style="vertical-align:middle;" width="29" height="20">
+        <defs><marker id="arrow_${r.prop}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="${edgeColors[r.prop]}"/>
+        </marker></defs>
+        <line x1="3" y1="12" x2="25" y2="12" stroke="${edgeColors[r.prop]}" stroke-width="4" marker-end="url(#arrow_${r.prop})"/>
+      </svg>
+      <span style="margin-left:2px;">${r.label}</span>
+    </span>`;
+  });
+  legendHtml += '</div>';
+  document.getElementById('graphTitle').innerHTML = legendHtml;
 
+  let nodes=[],edges=[];
+  quizList.forEach(q=>{
+    if(!nodes.some(n=>n.data.id===q.chara.id))nodes.push({data:{id:q.chara.id,label:q.chara.label}});
+    if(!nodes.some(n=>n.data.id===q.correct.id))nodes.push({data:{id:q.correct.id,label:q.correct.label}});
+    edges.push({data:{
+      id: q.chara.id+q.correct.id,
+      source: q.chara.id,
+      target: q.correct.id,
+      relation: q.relation
+    }});
+  });
+  var cy=cytoscape({
+    container:document.getElementById('cy'),
+    elements:[...nodes,...edges],
+    style:[
+      {selector:'node',style:{'label':'data(label)','background-color':'#4096d8','width':40,'height':40}},
+      {selector:'edge',style:{
+          'line-color':'data(edgeColor)',
+          'width':5,
+          'curve-style':'bezier',
+          'target-arrow-shape':'triangle',
+          'target-arrow-color':'data(edgeColor)',
+          'label':''
+        }},
+    ],
+    layout:{name:'cose'}
+  });
+  cy.edges().forEach(edge=>{
+    const prop = edge.data('relation').prop;
+    edge.data('edgeColor', edgeColors[prop]||'#c56');
+  });
+  cy.style().update();
+  cy.on('tap','node',evt=>{
+    let nodeId=evt.target.data('id'); showSidePanel(nodeId);
+  });
+
+  // 履歴保存: kind="normal"
+  if(graphHistory.length >= MAX_HISTORY) graphHistory.shift();
+  graphHistory.push({
+    qid: selectedWorkID,
+    kind: "normal",
+    nodes: JSON.parse(JSON.stringify(nodes)),
+    edges: JSON.parse(JSON.stringify(edges)),
+    title: selectedWorkLabel,
+    timestamp: new Date()
+  });
+  renderGraphHistoryList();
+}
+
+// --- 履歴リスト/合体候補表示、プレビュー＆合体 ---
+function renderGraphHistoryList() {
+  let qidGroups = {};
+  graphHistory.forEach((rec, idx) => {
+    if(rec.kind !== "merged") {
+      if(!qidGroups[rec.qid]) qidGroups[rec.qid] = [];
+      qidGroups[rec.qid].push(idx);
+    }
+  });
+  let html = "<div><strong>過去グラフ履歴：</strong></div>";
+  graphHistory.forEach((rec, idx) => {
+    const date = rec.timestamp.toLocaleTimeString();
+    let label = `[${rec.title}${rec.kind==="merged" ? "（合体）" : ""}] ${date}`;
+    html += `<button class="history-btn" onclick="showHistoryGraph(${idx})">${label}</button> `;
+  });
+  // QIDごとに統合候補が2個以上なら合体ボタン
+  Object.keys(qidGroups).forEach(qid=>{
+    if(qidGroups[qid].length >= 2) {
+      html += `<br><button style="margin:6px 0;" onclick="mergeGraphsPreview('${qid}')">［${qid} 合体グラフ生成］</button>`;
+    }
+  });
+  document.getElementById('sidepanel').innerHTML = html + "<hr style='margin:12px 0'>";
+}
+
+// 合体前プレビュー
+function mergeGraphsPreview(qid) {
+  let targets = graphHistory.filter(g => g.qid === qid && g.kind !== "merged");
+  if(targets.length < 2) return;
+  let preview = `<div style="margin:6px 0 12px 0;padding:.6em;border:1px solid #ccc;background:#fcfcfc;">
+  <b>合体対象: ${targets.length}件</b><br>`
+  + targets.map(g=>g.title+" "+g.timestamp.toLocaleTimeString()).join("<br>")
+  + `<br><button onclick="doMergeGraphForQID('${qid}')">このグラフで合体実行</button></div>`;
+  document.getElementById('sidepanel').innerHTML += preview;
+}
+
+// 実際に合体して保存
+function doMergeGraphForQID(qid) {
+  let targets = graphHistory.filter(g => g.qid === qid && g.kind !== "merged");
+  if(!targets.length) return;
+  // ノード・エッジ統合
+  let allNodes = [];
+  let allEdges = [];
+  targets.forEach(g=>{
+    g.nodes.forEach(n=>{
+      if(!allNodes.some(n2=>n2.data.id===n.data.id)) allNodes.push(JSON.parse(JSON.stringify(n)));
+    });
+    g.edges.forEach(e=>{
+      if(!allEdges.some(e2=>e2.data.id===e.data.id)) allEdges.push(JSON.parse(JSON.stringify(e)));
+    });
+  });
+  if(graphHistory.length >= MAX_HISTORY) graphHistory.shift();
+  graphHistory.push({
+    qid: qid,
+    kind: "merged",
+    nodes: allNodes,
+    edges: allEdges,
+    title: targets[0]?.title + "（合体）",
+    timestamp: new Date()
+  });
+  renderGraphHistoryList();
+}
+
+// 履歴グラフの再描画
+function showHistoryGraph(idx) {
+  let rec = graphHistory[idx];
+  document.getElementById('graphTitle').innerHTML = `<div><strong>${rec.title}</strong></div>`;
+  let cy=cytoscape({
+    container:document.getElementById('cy'),
+    elements:[...rec.nodes,...rec.edges],
+    style:[
+      {selector:'node',style:{'label':'data(label)','background-color':'#4096d8','width':40,'height':40}},
+      {selector:'edge',style:{
+          'line-color':'data(edgeColor)',
+          'width':5,
+          'curve-style':'bezier',
+          'target-arrow-shape':'triangle',
+          'target-arrow-color':'data(edgeColor)',
+          'label':''
+        }},
+    ],
+    layout:{name:'cose'}
+  });
+  cy.edges().forEach(edge=>{
+    const prop = edge.data('relation')?.prop;
+    edge.data('edgeColor', edgeColors[prop]||'#c56');
+  });
+  cy.style().update();
+}
+
+// サイドパネルノード詳細
+async function showSidePanel(id){
+  let q=`SELECT ?item ?itemLabel ?desc WHERE {
+    VALUES ?item { wd:${id} }
+    OPTIONAL { ?item rdfs:label ?itemLabel. FILTER(LANG(?itemLabel)="ja") }
+    OPTIONAL{ ?item schema:description ?desc. FILTER(LANG(?desc)="ja") }
+  } LIMIT 1`;
+  try{
+    let res=await runSparql(q);
+    let info=res.results.bindings[0];
+    let wikidataUrl='https://www.wikidata.org/wiki/'+id;
+    let html=`<strong>${info?.itemLabel?.value||id}</strong><br>`;
+    if(info?.desc)html+=`<div>${info.desc.value}</div>`;
+    html+=`<a href="${wikidataUrl}" target="_blank">Wikidata詳細</a>`;
+    document.getElementById('sidepanel').innerHTML+=html;
+  }catch(e){
+    document.getElementById('sidepanel').innerHTML='取得エラー';
+  }
+}
 </script>
 </body>
 </html>
+
+
