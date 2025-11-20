@@ -1,0 +1,421 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>wikidata アニメ・漫画作品の人物関係性クイズ</title>
+  <script src="https://unpkg.com/cytoscape/dist/cytoscape.min.js"></script>
+  <style>
+    body { font-family:'Arial','Meiryo',sans-serif; background:#f6f6fa; margin:0;}
+    .title { text-align:center; font-size:2.1em; font-weight:700; margin-top:45px; margin-bottom:32px;}
+    .search-box-wrap { display:flex; flex-direction:column; align-items:center; margin-top:10px; margin-bottom:28px;}
+    .search-box-inner { display:flex; gap:9px; }
+    #searchInput { font-size:1.15em; width:340px; padding:13px 18px; border:1.6px solid #bbb; border-radius:30px; background:#fff; outline:none;}
+    .search-btn { padding:13px 34px; font-size:1.15em; background:#4096d8; color:#fff; border:none; border-radius:30px; cursor:pointer; font-weight:bold;}
+    .container { display:flex; justify-content:center; align-items:flex-start; gap:30px; margin-top:5px;}
+    .main-area { flex:1 1 670px; max-width:860px; min-width:380px; background:#fff;
+      border-radius:14px; box-shadow:0 2px 14px rgba(180,180,190,0.13); padding:26px 33px; margin-bottom:50px; position:relative;}
+    .sidepanel {flex:0 0 330px; min-width:220px; max-width:340px; background:#fff;
+      border-radius:14px; box-shadow:0 2px 14px rgba(180,180,190,0.13); padding:17px 17px; margin-top:20px; margin-left:8px;
+      height:540px; overflow:auto; position:sticky; top:52px; z-index:10;}
+    #cy { width:620px; height:383px; border:1.4px solid #ccd; margin:13px auto 9px auto; border-radius:10px; background:#f7faff;}
+    .alert {background:#ffeaea;color:#c00;border:1px solid #eaa;padding:.6em;margin-top:1em;border-radius:8px;}
+    .quiz-area {margin-top:18px;margin-bottom:14px;}
+    .option-btn {margin:0.4em 0;}
+    .work-title {font-size:1.09em;font-weight:600;color:#4096d8;margin-bottom:8px;}
+    .character-list {font-size:1em;margin-bottom:10px;}
+    .subtle {font-size:.98em;color:#696; margin-left:.6em;}
+    #legend { position:absolute; top:10px; right:38px; background:#fafafb; border-radius:9px; box-shadow:0 0 8px #ddd; padding:10px 16px; font-size:0.98em; z-index:30;}
+    .history-btn { margin:0 6px 6px 0; }
+  </style>
+</head>
+<body>
+  <div class="title">wikidata アニメ・漫画作品の人物関係性クイズ</div>
+  <div class="search-box-wrap">
+    <div class="search-box-inner">
+      <input type="text" id="searchInput" placeholder="作品名を入力（例：ドラえもん、鬼滅の刃）">
+      <button class="search-btn" id="searchBtn" onclick="searchWorks()">作品検索</button>
+      <span id="loadingIndicator" style="display:none; color:#4096d8; font-weight:bold; margin-left:1em;">ロード中…</span>
+    </div>
+    <div id="workSuggest"></div>
+  </div>
+  <div class="container">
+    <div class="main-area">
+      <div id="characterList"></div>
+      <div id="quizConfig"></div>
+      <div class="quiz-area" id="quizArea"></div>
+      <div id="graphTitle"></div>
+      <div id="cy"></div>
+    </div>
+    <div class="sidepanel" id="sidepanel"></div>
+  </div>
+<script>
+const endpoint="https://query.wikidata.org/sparql";
+let selectedWorkID="",selectedWorkLabel="",characterArr=[],quizList=[];
+let graphHistory = [];
+const MAX_HISTORY = 3;
+
+const edgeColors = {
+  P22: "#e74c3c", P25: "#9b59b6", P3373: "#3498db", P26: "#e67e22",
+  P40: "#2ecc71", P1038: "#16a085", P1066: "#f1c40f"
+};
+const relationProps=[
+  {prop:'P22',label:'父'},{prop:'P25',label:'母'},{prop:'P3373',label:'兄弟姉妹'},
+  {prop:'P26',label:'配偶者'},{prop:'P40',label:'子'},{prop:'P1038',label:'親族'},{prop:'P1066',label:'師匠'}
+];
+const templates={
+  'P22':n=>`${n}の父はだれ？`,'P25':n=>`${n}の母はだれ？`,
+  'P3373':n=>`${n}の兄弟姉妹はだれ？`,'P26':n=>`${n}の配偶者はだれ？`,
+  'P40':n=>`${n}の子はだれ？`,'P1038':n=>`${n}の親族はだれ？`,'P1066':n=>`${n}の師匠はだれ？`
+};
+const genreQids = [
+  "Q5398426",    // テレビシリーズ
+  "Q2119834",    // 日本の連載漫画（※ゼロ1個修正済み！）
+  "Q196600"      // メディア・フランチャイズ
+];
+
+// --- 検索 ---
+async function searchWorks(){
+  const searchBtn = document.getElementById('searchBtn');
+  const loading = document.getElementById('loadingIndicator');
+  if (searchBtn) searchBtn.disabled = true;
+  if (loading) loading.style.display = '';
+  let word=document.getElementById('searchInput').value;
+  if(!word || word.length < 2) {
+    document.getElementById('workSuggest').innerHTML = "<span class='alert'>2文字以上で作品名を入力してください。</span>";
+    if (loading) loading.style.display = 'none';
+    if (searchBtn) searchBtn.disabled = false;
+    return;
+  }
+  let allResults = [];
+  for(const qid of genreQids) {
+    let q = `
+      SELECT DISTINCT ?item ?itemLabel WHERE {
+        ?item wdt:P31/wdt:P279* wd:${qid} .
+        ?item rdfs:label ?itemLabel .
+        FILTER(LANG(?itemLabel) = "ja")
+        FILTER(CONTAINS(?itemLabel, "${word}"))
+      }
+      ORDER BY ?itemLabel
+      LIMIT 7
+    `;
+    try {
+      let res=await runSparql(q);
+      allResults.push(...res.results.bindings);
+    } catch(e) {}
+  }
+  // 重複除去
+  const seen = new Set();
+  const uniqResults = allResults.filter(b=>{
+    const k=b.item.value;
+    if(seen.has(k)) return false;
+    seen.add(k); return true;
+  });
+  let s="<span class='subtle'>候補作品（QID/5人以上）：</span><br>";
+  const checks = await Promise.all(uniqResults.map(async b => {
+    let id = b.item.value.split('/').pop();
+    let charQ = `SELECT DISTINCT ?character WHERE { wd:${id} wdt:P674 ?character . }`;
+    let charRes = await runSparql(charQ);
+    let count = Array.from(new Set(charRes.results.bindings.map(c=>c.character.value.split('/').pop()))).length;
+    return {id, label: b.itemLabel.value, count};
+  }));
+  checks.filter(obj => obj.count >= 5)
+    .forEach(obj => {
+      s += `<button onclick="selectWork('${obj.id}','${obj.label}')">${obj.label}(QID:${obj.id}/${obj.count}人)</button><br>`;
+    });
+  if (s.indexOf("button") === -1) s+="<span class='alert'>該当作品なし（登場人物5人以上のみ表示）</span>";
+  document.getElementById('workSuggest').innerHTML = s;
+  document.getElementById('characterList').innerHTML = '';
+  document.getElementById('quizConfig').innerHTML = '';
+  document.getElementById('quizArea').innerHTML = '';
+  document.getElementById('cy').innerHTML = '';
+  document.getElementById('sidepanel').innerHTML = '';
+  document.getElementById('graphTitle').innerHTML = '';
+  if (loading) loading.style.display = 'none';
+  if (searchBtn) searchBtn.disabled = false;
+}
+
+async function runSparql(query){
+  let url=endpoint+"?query="+encodeURIComponent(query);
+  let headers={'Accept':'application/sparql-results+json'};
+  let resp=await fetch(url,{headers});
+  if(!resp.ok) throw new Error('SPARQL fetch失敗');
+  return await resp.json();
+}
+async function fetchCharactersFlexible(workQid,workLabel){
+  let q=`SELECT DISTINCT ?character ?characterLabel WHERE {
+    wd:${workQid} wdt:P674 ?character .
+    SERVICE wikibase:label { bd:serviceParam wikibase:language "ja,en". }
+  } LIMIT 40`;
+  let res=await runSparql(q);
+  return res.results.bindings;
+}
+async function selectWork(id,label){
+  selectedWorkID=id; selectedWorkLabel=label;
+  characterArr=await fetchCharactersFlexible(id,label);
+  if(characterArr.length===0){
+    document.getElementById('characterList').innerHTML=
+      `<span class='alert'>登場人物未取得（0名）。Wikidataのデータ不足、または表記ゆれの可能性があります。</span>`;
+    document.getElementById('quizConfig').innerHTML='';
+    document.getElementById('quizArea').innerHTML='';
+    document.getElementById('cy').innerHTML='';
+    document.getElementById('sidepanel').innerHTML='';
+    document.getElementById('graphTitle').innerHTML='';
+    return;
+  }
+  let out=`<div class="work-title">${selectedWorkLabel}（登場人物${characterArr.length}名）</div>`;
+  out+=`<div class="character-list">`;
+  characterArr.forEach(obj=>{
+    out+=`<span>${obj.characterLabel?.value||obj.character.value.split('/').pop()}</span> `;
+  });
+  out+=`</div>`;
+  document.getElementById('characterList').innerHTML=out;
+  showQuizConfig();
+  document.getElementById('quizArea').innerHTML='';
+  document.getElementById('cy').innerHTML='';
+  document.getElementById('sidepanel').innerHTML='';
+  document.getElementById('graphTitle').innerHTML='';
+}
+function showQuizConfig() {
+  let html = `<button class="search-btn" id="quizGenBtn" style="margin:12px 0;" onclick="startQuiz(5)">クイズ生成</button>
+    <span id="quizLoading" style="display:none; color:#4096d8; font-weight:bold; margin-left:1em;">ロード中…</span>`;
+  document.getElementById('quizConfig').innerHTML = html;
+}
+async function startQuiz(num){
+  const quizBtn = document.getElementById('quizGenBtn');
+  const quizLoading = document.getElementById('quizLoading');
+  if (quizBtn) quizBtn.disabled = true;
+  if (quizLoading) quizLoading.style.display = '';
+  quizList=[]; let candidArr=characterArr.slice(),loop=0;
+  try {
+    for(let i=0;i<num;i++){
+      if(candidArr.length===0||loop>100)break; loop++;
+      let idx=Math.floor(Math.random()*candidArr.length);
+      let chara=candidArr.splice(idx,1)[0];
+      let relObj=relationProps[Math.floor(Math.random()*relationProps.length)];
+      let charaId=chara.character.value.split('/').pop();
+      let charaLabel=chara.characterLabel?.value||charaId;
+      let q=`SELECT ?target ?targetLabel WHERE {
+        wd:${charaId} wdt:${relObj.prop} ?target.
+        SERVICE wikibase:label { bd:serviceParam wikibase:language "ja, en". }
+      } LIMIT 1`;
+      let res=await runSparql(q);
+      if(res.results.bindings.length===0){i--;continue;}
+      let correct=res.results.bindings[0];
+      let correctObj={
+        id:correct.target.value.split('/').pop(),
+        label:(typeof correct.targetLabel?.value==='string'&&correct.targetLabel.value.trim())
+              ? correct.targetLabel.value : correct.target.value.split('/').pop()
+      };
+      let others=characterArr.filter(o=>o.character.value.split('/').pop()!==charaId);
+      let wrongs=[];
+      while(wrongs.length<3&&others.length>0){
+        let widx=Math.floor(Math.random()*others.length);
+        let witem=others.splice(widx,1)[0];
+        let wId=witem.character.value.split('/').pop();
+        wrongs.push({
+          id:wId,
+          label:(typeof witem.characterLabel?.value==='string'&&witem.characterLabel.value.trim()) 
+                ? witem.characterLabel.value : wId
+        });
+      }
+      quizList.push({
+        question:templates[relObj.prop](charaLabel),
+        correct:correctObj, wrongs:wrongs, chara:{id:charaId,label:charaLabel}, relation:relObj
+      });
+    }
+    score=0;userAnswers=[];
+    showQuizQuestion(0);
+  } finally {
+    if (quizBtn) quizBtn.disabled = false;
+    if (quizLoading) quizLoading.style.display = 'none';
+  }
+}
+let currentQuiz=0,score=0,userAnswers=[];
+function showQuizQuestion(idx){
+  if(idx>=quizList.length){
+    document.getElementById('quizArea').innerHTML=
+      `<div class="result">クイズ終了　スコア: ${score}/${quizList.length}</div><button onclick="drawGraph()">人物関係グラフ表示へ</button>`;
+    return;
+  }
+  let q=quizList[idx],opts=[q.correct,...q.wrongs];
+  for(let i=opts.length-1;i>0;i--){let j=Math.floor(Math.random()*(i+1));[opts[i],opts[j]]=[opts[j],opts[i]];}
+  let html=`<strong>Q${idx+1}: ${q.question}</strong><br>`;
+  opts.forEach(o=>{
+    html+=`<button class="option-btn" onclick="submitAnswer('${o.id}','${q.correct.id}','${o.label}','${q.correct.label}')">${o.label}</button><br>`;
+  });
+  html+=`<div>現在のスコア: ${score}/${idx}</div>`;
+  document.getElementById('quizArea').innerHTML=html; currentQuiz=idx;
+}
+function submitAnswer(ans,cor,selectedLabel,correctLabel){
+  let correct=(ans===cor); userAnswers.push({correct, selectedLabel, correctLabel});
+  if(correct)score++;
+  let resultHtml = `<strong style="font-size:1.23em;">${correct ? "正解！" : "不正解"}</strong><br>`;
+  resultHtml += `あなたの選択：<span style="font-weight:bold;">${selectedLabel}</span><br>`;
+  if(!correct){
+    resultHtml += `正しい答え：<span style="font-weight:bold; color:#4096d8">${correctLabel}</span><br>`;
+  }
+  resultHtml += `<button class="search-btn" onclick="showQuizQuestion(currentQuiz+1)" style="margin-top:1em;">次の問題へ</button>`;
+  resultHtml += `<div style="margin-top:8px;">現在のスコア: ${score}/${currentQuiz+1}</div>`;
+  document.getElementById('quizArea').innerHTML = resultHtml;
+}
+
+// ---- グラフ一式＋エッジホバーラベル追加！ ----
+function drawGraph(){
+  let legendHtml = '<div id="legend">'
+    + '<span style="font-weight:bold;">関係性カラー：</span><br>';
+  relationProps.forEach(r=>{
+    legendHtml += `<span style="display:inline-block; margin:3px 13px 3px 0;">
+      <svg style="vertical-align:middle;" width="29" height="20">
+        <defs><marker id="arrow_${r.prop}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="${edgeColors[r.prop]}"/>
+        </marker></defs>
+        <line x1="3" y1="12" x2="25" y2="12" stroke="${edgeColors[r.prop]}" stroke-width="4" marker-end="url(#arrow_${r.prop})"/>
+      </svg>
+      <span style="margin-left:2px;">${r.label}</span>
+    </span>`;
+  });
+  legendHtml += '</div>';
+  document.getElementById('graphTitle').innerHTML = legendHtml;
+
+  let nodes=[],edges=[];
+  quizList.forEach(q=>{
+    if(!nodes.some(n=>n.data.id===q.chara.id))nodes.push({data:{id:q.chara.id,label:q.chara.label}});
+    if(!nodes.some(n=>n.data.id===q.correct.id))nodes.push({data:{id:q.correct.id,label:q.correct.label}});
+    edges.push({data:{
+      id: q.chara.id+q.correct.id,
+      source: q.chara.id,
+      target: q.correct.id,
+      relation: q.relation
+    }});
+  });
+  var cy=cytoscape({
+    container:document.getElementById('cy'),
+    elements:[...nodes,...edges],
+    style:[
+      {selector:'node',style:{'label':'data(label)','background-color':'#4096d8','width':40,'height':40}},
+      {selector:'edge',style:{
+          'line-color':'data(edgeColor)',
+          'width':5,
+          'curve-style':'bezier',
+          'target-arrow-shape':'triangle',
+          'target-arrow-color':'data(edgeColor)',
+          'label':''
+        }},
+    ],
+    layout:{name:'cose'}
+  });
+  cy.edges().forEach(edge=>{
+    const prop = edge.data('relation')?.prop;
+    edge.data('edgeColor', edgeColors[prop]||'#c56');
+  });
+  cy.style().update();
+
+  // ←ここ追加
+  cy.on('mouseover', 'edge', function(evt) {
+    const edge = evt.target;
+    const rel = edge.data('relation');
+    if(rel && rel.label) edge.style('label', rel.label);
+  });
+  cy.on('mouseout', 'edge', function(evt) {
+    evt.target.style('label', '');
+  });
+  // タッチ端末対応
+  let lastTapEdge = null;
+  cy.on('tap', 'edge', function(evt) {
+    if(lastTapEdge) lastTapEdge.style('label','');
+    lastTapEdge = evt.target;
+    const rel = lastTapEdge.data('relation');
+    if(rel && rel.label) lastTapEdge.style('label', rel.label);
+  });
+  cy.on('tapend', function() {
+    if(lastTapEdge) lastTapEdge.style('label', '');
+    lastTapEdge = null;
+  });
+
+  cy.on('tap','node',evt=>{
+    let nodeId=evt.target.data('id'); showSidePanel(nodeId);
+  });
+  document.getElementById('quizArea').innerHTML = '';
+
+  if(graphHistory.length >= MAX_HISTORY) graphHistory.shift();
+  graphHistory.push({
+    qid: selectedWorkID,
+    kind: "normal",
+    nodes: JSON.parse(JSON.stringify(nodes)),
+    edges: JSON.parse(JSON.stringify(edges)),
+    title: selectedWorkLabel,
+    timestamp: new Date()
+  });
+  renderGraphHistoryList();
+}
+
+// -- showHistoryGraph側にも同様のエッジイベント追加! --
+function showHistoryGraph(idx) {
+  let rec = graphHistory[idx];
+  let legendHtml = '<div id="legend">'
+    + '<span style="font-weight:bold;">関係性カラー：</span><br>';
+  relationProps.forEach(r=>{
+    legendHtml += `<span style="display:inline-block; margin:3px 13px 3px 0;">
+      <svg style="vertical-align:middle;" width="29" height="20">
+        <defs><marker id="arrow_${r.prop}" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="${edgeColors[r.prop]}"/>
+        </marker></defs>
+        <line x1="3" y1="12" x2="25" y2="12" stroke="${edgeColors[r.prop]}" stroke-width="4" marker-end="url(#arrow_${r.prop})"/>
+      </svg>
+      <span style="margin-left:2px;">${r.label}</span>
+    </span>`;
+  });
+  legendHtml += '</div>';
+  document.getElementById('graphTitle').innerHTML = legendHtml;
+
+  let cy=cytoscape({
+    container:document.getElementById('cy'),
+    elements:[...rec.nodes,...rec.edges],
+    style:[
+      {selector:'node',style:{'label':'data(label)','background-color':'#4096d8','width':40,'height':40}},
+      {selector:'edge',style:{
+          'line-color':'data(edgeColor)',
+          'width':5,
+          'curve-style':'bezier',
+          'target-arrow-shape':'triangle',
+          'target-arrow-color':'data(edgeColor)',
+          'label':''
+        }},
+    ],
+    layout:{name:'cose'}
+  });
+  cy.edges().forEach(edge=>{
+    const prop = edge.data('relation')?.prop;
+    edge.data('edgeColor', edgeColors[prop]||'#c56');
+  });
+  cy.style().update();
+  cy.on('mouseover', 'edge', function(evt) {
+    const edge = evt.target;
+    const rel = edge.data('relation');
+    if(rel && rel.label) edge.style('label', rel.label);
+  });
+  cy.on('mouseout', 'edge', function(evt) {
+    evt.target.style('label', '');
+  });
+  // タッチ端末対応
+  let lastTapEdge = null;
+  cy.on('tap', 'edge', function(evt) {
+    if(lastTapEdge) lastTapEdge.style('label','');
+    lastTapEdge = evt.target;
+    const rel = lastTapEdge.data('relation');
+    if(rel && rel.label) lastTapEdge.style('label', rel.label);
+  });
+  cy.on('tapend', function() {
+    if(lastTapEdge) lastTapEdge.style('label', '');
+    lastTapEdge = null;
+  });
+  cy.on('tap','node',evt=>{
+    let nodeId=evt.target.data('id'); showSidePanel(nodeId);
+  });
+}
+
+// --- その他 履歴/合体/sidepanel部分はあなたの現状コードそのまま動きます ---
+
+</script>
+</body>
+</html>
